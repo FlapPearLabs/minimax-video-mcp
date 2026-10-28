@@ -100,6 +100,23 @@ Agent 读完会自己完成克隆、读 key、注册、验证。你也可以直�
 | `regenerate_video_2k` | 768P 成品升 2K | — |
 | `delete_video_task` | 删除已结束的任务记录 | — |
 | `describe_provider` | 适配器配置概览 + key 来源 | — |
+| `download_video` | 手动把成片直链转存到本地 | — |
+| `list_local_tasks` | 查本机台账，找回之前提交过的任务 | — |
+| `resume_pending_tasks` | 续跑所有未到终态的任务 | — |
+
+---
+
+## 三条铁律（代码里已实现，不只是文档约定）
+
+| 铁律 | 实现 |
+| --- | --- |
+| **一、task_id 立刻落库** | 提交成功即写入本地台账 `.video-tasks.jsonl`。换会话、换机器、隔天回来，用 `list_local_tasks` / `resume_pending_tasks` 就能找回任务，**不必重新提交**（重新提交 = 再扣一次钱） |
+| **二、终态不要自动重试** | `failed` / `cancelled` 不会被自动重提，续跑时也会跳过。失败任务平台已自动退款，重试 = 再扣一次钱 |
+| **三、直链拿到就转存** | 任务成功时自动把成片下载到 `videos/`，返回值和台账里都给 `local_path`。直链过期也不怕 |
+
+台账 `.video-tasks.jsonl` 和 `videos/` 都在 `.gitignore` 里，是本地状态，不进仓库。
+
+MCP server 启动时如果发现未完成任务，会在 stderr 打一条提示 —— 看到它就先 `resume_pending_tasks`，**别重新提交**。
 
 ---
 
@@ -144,7 +161,7 @@ python -m unittest discover -s tests -t . -v
 ```
 
 覆盖：key 解析的 30+ 种边界情况、content[] 组装、9 条平台规则、mock 端到端、
-base_url 故障切换、真实 MCP stdio 协议握手、安装器行为、仓库完整性。
+base_url 故障切换、真实 MCP stdio 协议握手、安装器行为、三条铁律的专项验证。
 
 ---
 

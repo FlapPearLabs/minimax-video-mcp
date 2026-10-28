@@ -32,6 +32,9 @@ STATE: Dict[str, Dict[str, Any]] = {}
 _counter = {"n": 0}
 _lock = threading.Lock()
 
+# 请求计数 —— 测试用它来证明"终态不会被自动重提"
+STATS = {"creates": 0, "queries": 0, "downloads": 0}
+
 MODELS = [
     {"id": "MiniMax-H3", "object": "model"},
     {"id": "MiniMax-H3-Max", "object": "model"},
@@ -131,6 +134,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with _lock:
                 _counter["n"] += 1
+                STATS["creates"] += 1
                 tid = str(10000 + _counter["n"])
                 STATE[tid] = {"polls": 0, "payload": body}
             self._send(200, {"task_id": tid})
@@ -159,6 +163,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send(401, {"error": {"code": "missing_api_key", "message": "缺少 API key", "type": "authentication_error"}})
             return
 
+        # 成片文件（供自动转存测试下载）
+        m = re.match(r"^/files/([\w.-]+\.mp4)$", self.route)
+        if m:
+            STATS["downloads"] += 1
+            body = b"FAKEMP4" + b"0" * 2048
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if self.route == "/v1/models":
             self._send(200, {"object": "list", "data": MODELS})
             return
@@ -174,6 +190,7 @@ class Handler(BaseHTTPRequestHandler):
                 rec["polls"] += 1
                 polls = rec["polls"]
                 payload = rec["payload"]
+            STATS["queries"] += 1
             base = f"http://127.0.0.1:{self.server.server_address[1]}"
             if polls < 2:
                 self._send(200, {"task": {
@@ -182,6 +199,16 @@ class Handler(BaseHTTPRequestHandler):
                     "resolution": payload.get("resolution"), "ratio": payload.get("ratio"),
                     "duration": payload.get("duration"), "usage": {},
                     "created_at": 1788463493, "updated_at": 1788463493,
+                }})
+                return
+            # prompt 里带 FAILME 的任务直接判失败（用于测试终态不重试）
+            if "FAILME" in str(payload.get("content", "")):
+                self._send(200, {"task": {
+                    "id": tid, "model": payload.get("model"), "status": "failed",
+                    "task_type": "generation", "modality": "video",
+                    "error": {"code": "1026", "message": "内容审核不通过"},
+                    "resolution": payload.get("resolution"), "duration": payload.get("duration"),
+                    "usage": {}, "created_at": 1788463493, "updated_at": 1788463751,
                 }})
                 return
             self._send(200, {"task": {

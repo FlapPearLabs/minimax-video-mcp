@@ -33,6 +33,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -59,6 +60,7 @@ except ImportError as _exc:  # pragma: no cover
     raise SystemExit(2)
 
 import keyfile
+import journal
 
 # --------------------------------------------------------------------------
 # 配置装载
@@ -72,6 +74,7 @@ CONFIG: Dict[str, Any] = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 RETRY_STATUS = {429, 500, 502, 503, 504}
 TERMINAL_OK = {"succeeded"}
 TERMINAL_BAD = {"failed", "cancelled"}
+TERMINAL_STATUSES = TERMINAL_OK | TERMINAL_BAD
 
 mcp = FastMCP(CONFIG.get("name", "video-api"))
 
@@ -464,6 +467,91 @@ def _map_status(raw: Any) -> str:
 
 
 # --------------------------------------------------------------------------
+# 任务台账与产物转存 —— 铁律一（task_id 立刻落库）/ 铁律三（直链拿到就转存）
+# --------------------------------------------------------------------------
+def _journal() -> "journal.TaskJournal":
+    """本地任务台账。路径来自 provider.json 的 journal.path。"""
+    cfg = CONFIG.get("journal") or {}
+    path = Path(cfg.get("path") or ".video-tasks.jsonl")
+    if not path.is_absolute():
+        path = CONFIG_DIR / path
+    return journal.TaskJournal(path)
+
+
+def _download_dir() -> Path:
+    cfg = CONFIG.get("journal") or {}
+    d = Path(cfg.get("download_dir") or "videos")
+    if not d.is_absolute():
+        d = CONFIG_DIR / d
+    return d
+
+
+def _safe_stem(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value))[:80] or "video"
+
+
+def _guess_task_id(url: str) -> str:
+    """从直链里猜出文件名 stem，拿不到就用时间戳。"""
+    try:
+        name = Path(url.split("?")[0]).name
+        stem = Path(name).stem
+        if stem:
+            return _safe_stem(stem)
+    except Exception:  # noqa: BLE001
+        pass
+    return f"video-{int(time.time())}"
+
+
+def _download_to(task_id: str, url: str) -> Path:
+    """把直链下载到本地，返回文件路径。先写 .part 再改名，避免半截文件。"""
+    cfg = CONFIG.get("journal") or {}
+    d = _download_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    suffix = Path(url.split("?")[0]).suffix or ".mp4"
+    target = d / f"{_safe_stem(task_id)}{suffix}"
+    timeout = int(cfg.get("download_timeout_seconds", 600))
+    max_bytes = int(cfg.get("download_max_bytes", 800 * 1024 * 1024))
+    tmp = target.with_name(target.name + ".part")
+
+    # 有些站点/CDN 的产物直链也要鉴权，一并带上（CDN 会忽略多余头）
+    dl_headers = {
+        k: v for k, v in _headers().items() if k.lower() not in ("content-type", "accept")
+    }
+
+    with requests.get(url, stream=True, timeout=timeout, headers=dl_headers) as r:
+        r.raise_for_status()
+        written = 0
+        with tmp.open("wb") as fh:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                written += len(chunk)
+                if written > max_bytes:
+                    tmp.unlink(missing_ok=True)
+                    raise RuntimeError(f"成片超过下载上限 {max_bytes} 字节，已中止")
+                fh.write(chunk)
+    tmp.replace(target)
+    return target
+
+
+def _download_if_needed(task_id: str, url: str) -> Optional[str]:
+    """幂等转存：台账里已有且文件还在，就不重复下载。"""
+    cfg = CONFIG.get("journal") or {}
+    if not cfg.get("auto_download", True):
+        return None
+    existing = _journal().get(task_id) or {}
+    local = existing.get("local_path")
+    if local and Path(local).exists():
+        return str(local)
+    try:
+        path = _download_to(task_id, url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[警告] 自动转存失败（{task_id}）：{exc}", file=sys.stderr)
+        return None
+    return str(path)
+
+
+# --------------------------------------------------------------------------
 # 工具
 # --------------------------------------------------------------------------
 @mcp.tool()
@@ -522,6 +610,38 @@ def submit_video_generation(
         timeout=create_cfg.get("timeout_seconds", 60),
     )
     task_id = _extract_task_id(resp, create_cfg)
+
+    # ── 铁律一：task_id 立刻落库 ─────────────────────────────
+    # 不落库的话，一旦会话重启 / 换窗口，就再也查不回这个任务了，
+    # 而重新提交一次 = 再扣一次钱。
+    _journal().record(
+        task_id,
+        event="submitted",
+        status="queued",
+        model=payload.get("model"),
+        prompt=args.get("prompt"),
+        duration=payload.get("duration"),
+        resolution=payload.get("resolution"),
+        ratio=payload.get("ratio"),
+        request_payload=payload,
+    )
+
+    # 顺手提示"你是不是在重复提交"（重建任务 = 再扣一次钱）
+    duplicates = _journal().find_similar(
+        model=payload.get("model"),
+        prompt=args.get("prompt"),
+        duration=payload.get("duration"),
+        resolution=payload.get("resolution"),
+        ratio=payload.get("ratio"),
+    )
+    if duplicates:
+        print(
+            f"[提示] 1 小时内有 {len(duplicates)} 个参数完全相同的任务："
+            f"{[d['task_id'] for d in duplicates]} —— 如果只是想要重跑，"
+            f"先查它们的状态，别重复扣费。",
+            file=sys.stderr,
+        )
+
     return {
         "task_id": task_id,
         "status": "queued",
@@ -585,7 +705,105 @@ def query_video_generation(task_id: str, model: Optional[str] = None) -> Dict[st
         out["usage"] = usage
     if status in TERMINAL_BAD and "error" not in out:
         out["error"] = {"code": None, "message": "任务失败，未返回具体原因"}
+
+    # ── 铁律一：状态变化同步进台账 ─────────────────────────
+    _journal().record(
+        task_id,
+        event="polled",
+        status=status,
+        raw_status=raw_status,
+        video_url=out.get("video_url"),
+        error=out.get("error"),
+        usage=usage,
+        model=out.get("model"),
+    )
+
+    # ── 铁律三：直链拿到就转存 ─────────────────────────────
+    # 产物直链会过期。与其等它过期，不如当场存到本地。
+    if status == "succeeded" and out.get("video_url"):
+        local = _download_if_needed(task_id, out["video_url"])
+        if local:
+            out["local_path"] = local
+            _journal().record(task_id, event="downloaded", status=status, local_path=local)
+
     return out
+
+
+@mcp.tool()
+def download_video(video_url: str, task_id: Optional[str] = None) -> Dict[str, Any]:
+    """把成片直链下载到本地（转存）。
+
+    直链会过期，拿到就存。query_video_generation 在任务成功时会自动调一次本函数，
+    这里暴露出来是为了让你能在直链快过期时手动再存一份。
+
+    参数:
+        video_url: 成片直链。
+        task_id: 任务 ID（可选）。给了就存成 {task_id}.mp4 并记进台账。
+
+    返回: {"local_path", "bytes"}
+    """
+    if not video_url:
+        raise RuntimeError("video_url 不能为空")
+    tid = task_id or _guess_task_id(video_url)
+    path = _download_to(tid, video_url)
+    size = path.stat().st_size if path.exists() else 0
+    if tid:
+        _journal().record(tid, event="downloaded", local_path=str(path), video_url=video_url)
+    return {"local_path": str(path), "bytes": size, "task_id": tid}
+
+
+@mcp.tool()
+def list_local_tasks(
+    status: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """列出本机台账（journal）里的视频任务。
+
+    这是「task_id 立刻落库」的查询口 —— 换会话、换机器、隔一天回来，
+    靠它就能找回之前提交过的任务，不必重新提交（重新提交 = 再扣一次钱）。
+
+    参数:
+        status: 按状态过滤。queued / running / succeeded / failed / cancelled。
+                 不填则返回全部。
+        limit: 最多返回多少条（按最近优先）。
+
+    返回: {"tasks": [...], "total": n, "journal_path": "..."}
+    """
+    tasks = _journal().list(status=status, limit=limit)
+    return {
+        "tasks": tasks,
+        "total": len(tasks),
+        "journal_path": str(_journal().path),
+    }
+
+
+@mcp.tool()
+def resume_pending_tasks(limit: int = 10) -> Dict[str, Any]:
+    """继续查询所有未到终态的任务（换会话后用来续跑）。
+
+    视频任务动辄十几分钟，会话很可能中途就断了。
+    本工具会拿台账里所有 queued / running 的任务去站点查一次，
+    返回它们的当前状态；成功的会自动转存成片。
+
+    参数:
+        limit: 一次最多续查多少个任务。
+
+    返回: {"resumed": [...], "still_pending": [...]}
+    """
+    pending = _journal().pending()[:limit]
+    resumed: List[Dict[str, Any]] = []
+    for task in pending:
+        tid = str(task.get("task_id"))
+        try:
+            result = query_video_generation(task_id=tid, model=task.get("model"))
+        except Exception as exc:  # noqa: BLE001
+            result = {"task_id": tid, "status": "unknown", "error": {"message": str(exc)}}
+        resumed.append(result)
+    still_pending = [r for r in resumed if r.get("status") not in TERMINAL_STATUSES]
+    return {
+        "resumed": resumed,
+        "still_pending": [r.get("task_id") for r in still_pending],
+    }
 
 
 @mcp.tool()
@@ -786,6 +1004,25 @@ def describe_provider() -> Dict[str, Any]:
         "result_paths": CONFIG.get("result"),
         "rules": CONFIG.get("rules"),
     }
+
+
+def _announce_pending_tasks() -> None:
+    """启动时提示有没有未完成的任务 —— 换会话后的第一件事。"""
+    try:
+        pending = _journal().pending()
+    except Exception:  # noqa: BLE001
+        return
+    if pending:
+        print(
+            f"[提示] 台账里有 {len(pending)} 个未完成任务："
+            f"{[t.get('task_id') for t in pending]}。"
+            f"调用 resume_pending_tasks 可以续跑"
+            f"（别重新提交，重新提交 = 再扣一次钱）。",
+            file=sys.stderr,
+        )
+
+
+_announce_pending_tasks()
 
 
 if __name__ == "__main__":

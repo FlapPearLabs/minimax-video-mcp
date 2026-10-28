@@ -108,6 +108,15 @@
     "hailuo-h3-zaishengcheng"
   ],
 
+  "journal": {
+    "_说明": "任务台账与产物转存。铁律一（task_id 立刻落库）+ 铁律三（直链拿到就转存）。",
+    "path": ".video-tasks.jsonl",
+    "auto_download": true,
+    "download_dir": "videos",
+    "download_timeout_seconds": 600,
+    "download_max_bytes": 838860800
+  },
+
   "extra_endpoints": {
     "list_tasks": {
       "method": "GET",

@@ -137,7 +137,7 @@ model=MiniMax-H3, duration=4, resolution=768P, ratio=16:9, prompt=一句话
 
 - 提交前**必须**向用户确认这会产生计费调用
 - 拿到 `task_id` 后用 `query_video_generation` 每 8 秒轮询，直到 `succeeded` 或 `failed`
-- `succeeded` 后把 `video_url` 拿下来，确认能下到 mp4
+- `succeeded` 时返回里会带 `local_path`（已自动转存到 `videos/`），确认这个 mp4 能播
 - **失败不要自动重试**（已自动退款），要重试先问用户
 
 ## 工具契约（回归护栏，勿随意改名）
@@ -151,6 +151,24 @@ model=MiniMax-H3, duration=4, resolution=768P, ratio=16:9, prompt=一句话
 - `regenerate_video_2k(source_task_id, base_video_url, resolution)`
 - `delete_video_task(task_id)`
 - `describe_provider()`
+
+以下三个是本项目额外提供的（用来落实"三条铁律"）：
+
+- `download_video(video_url, task_id)` —— 手动转存成片
+- `list_local_tasks(status, limit)` —— 查本机台账（找回之前提交过的任务）
+- `resume_pending_tasks(limit)` —— 续跑所有未到终态的任务
+
+## 三条铁律（代码里已实现，不只是文档约定）
+
+| 铁律 | 实现 |
+| --- | --- |
+| **一、task_id 立刻落库** | 提交成功即写入本地台账 `.video-tasks.jsonl`（追加式事件日志）。换会话、换机器、隔天回来，用 `list_local_tasks` / `resume_pending_tasks` 就能找回任务，**不必重新提交** |
+| **二、终态不要自动重试** | `failed` / `cancelled` 不会被自动重提，续跑时也会跳过。失败任务已自动退款，重试 = 再扣一次钱 |
+| **三、直链拿到就转存** | 任务成功时 `query_video_generation` 自动把成片下载到 `videos/` 目录，并在返回值和台账里给出 `local_path`。直链过期也不怕 |
+
+台账与成片目录都已在 `.gitignore` 里，是本地状态，不进仓库。
+
+MCP server 启动时，如果台账里有未完成任务，会在 stderr 打一条提示 —— 看到它就先 `resume_pending_tasks`，别重新提交。
 
 ## 禁止事项
 

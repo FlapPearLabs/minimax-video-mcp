@@ -104,7 +104,8 @@ class McpProtocolCase(unittest.TestCase):
         names = {t["name"] for t in listed["result"]["tools"]}
         self.assertTrue(OFFICIAL_TOOL_NAMES.issubset(names), names)
         for expected in ("list_video_models", "list_video_tasks",
-                         "regenerate_video_2k", "delete_video_task", "describe_provider"):
+                         "regenerate_video_2k", "delete_video_task", "describe_provider",
+                         "download_video", "list_local_tasks", "resume_pending_tasks"):
             self.assertIn(expected, names)
 
     def test_tool_schemas_have_required_prompt(self):

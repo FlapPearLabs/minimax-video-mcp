@@ -27,3 +27,9 @@ provider.local.json
 *.log
 .DS_Store
 Thumbs.db
+
+# ── 任务台账与成片（本地状态，不进仓库）──────────
+.video-tasks.jsonl
+*.jsonl
+videos/
+*.part
