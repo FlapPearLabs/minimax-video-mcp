@@ -33,11 +33,13 @@ class McpProtocolCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def setUp(self):
         self.tmp = tmpdir()
         self.env, _ = make_env(self.base, self.tmp)
         self.env["PYTHONUNBUFFERED"] = "1"
+        self.env["PYTHONWARNINGS"] = "ignore::ResourceWarning"
         self.proc = subprocess.Popen(
             [sys.executable, str(ROOT / "server.py")],
             stdin=subprocess.PIPE,
@@ -51,14 +53,19 @@ class McpProtocolCase(unittest.TestCase):
 
     def tearDown(self):
         try:
-            self.proc.stdin.close()
-        except Exception:
-            pass
-        self.proc.terminate()
-        try:
+            self.proc.terminate()
             self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+            try:
+                if pipe and not pipe.closed:
+                    pipe.close()
+            except Exception:
+                pass
 
     def rpc(self, payload: dict, expect_id: bool = True):
         self.proc.stdin.write(json.dumps(payload) + "\n")

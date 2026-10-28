@@ -228,9 +228,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": {"code": "not_found", "message": f"not found: {self.route}", "type": "not_found"}})
 
 
+class MockServer(ThreadingHTTPServer):
+    """线程守护 + 允许端口复用，避免测试结束时残留 socket 警告。"""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def start(port: int = 0):
     """启动 mock 服务，返回 (server, thread, base_url)。"""
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = MockServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     time.sleep(0.1)
