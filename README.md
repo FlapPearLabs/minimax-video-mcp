@@ -84,6 +84,9 @@ Agent 读完会自己完成克隆、读 key、注册、验证。你也可以直�
 > 帮我把 https://github.com/FlapPearLabs/minimax-video-mcp.git 这个项目接进 MiniMax Code。
 > key 在 api.txt 里。
 
+> **要把这个项目分享给别人？** 看 [`给同学的说明.md`](给同学的说明.md) —— 里面有可以直接群发的文案，
+> 和一段转发给同学自己 AI 助手的提示词。
+
 ---
 
 ## 提供的工具
