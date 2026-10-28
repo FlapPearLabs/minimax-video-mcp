@@ -1,0 +1,12 @@
+# 把你的中转站 API Key 写在这行，然后保存。
+#   cp api.txt.example api.txt      （Windows: copy api.txt.example api.txt）
+#
+# 写完删掉这一行注释，只留 key 本体即可，格式很宽松：
+#   sk-xxxxxxxxxxxx                  ← 标准写法
+#   Bearer sk-xxxxxxxxxxxx           ← 带前缀也认
+#   "sk-xxxxxxxxxxxx"                ← 带引号也认
+#
+# 以 # 开头的行会被忽略；多个 key 会取第一个 sk- 开头的。
+#
+# ⚠️ api.txt 已在 .gitignore 里，不要提交、不要贴进聊天。
+# 想彻底不落盘也可以用环境变量：VIDEO_API_KEY=sk-xxxx

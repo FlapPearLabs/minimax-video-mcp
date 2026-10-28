@@ -1,0 +1,15 @@
+# 仓库内统一 LF，避免 Windows / macOS / Linux 混编时出现无谓 diff
+* text=auto
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
+
+# 二进制
+*.mp4  binary
+*.png  binary
+*.jpg  binary
+*.mov  binary
+*.mp3  binary
+*.wav  binary

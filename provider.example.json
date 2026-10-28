@@ -1,0 +1,123 @@
+{
+  "_说明": "通用模板 —— 换成任何厂商都从这份改。复制成 provider.json 再改。",
+  "_步骤": [
+    "1. base_url 改成厂商域名；多域名就填进 base_url_fallbacks",
+    "2. auth 选 bearer / header / query；key 放 api_key_file、api_key_env 或内联",
+    "3. create.path + query.path_template 对上厂商文档",
+    "4. payload.*_field 对上厂商的平铺字段名",
+    "5. 如果厂商用 content[] 数组（MiniMax 官方 V2 就是），保留 roles 段并改 role 名",
+    "6. status_map 把厂商状态值映射成 queued/running/succeeded/failed/cancelled",
+    "7. result.*_path 对上厂商响应体里的状态/产物位置",
+    "8. media_mode 选 base64（内联）/ url（只收公网直链）/ upload（先上传换 URL）"
+  ],
+
+  "name": "example-video-api",
+  "base_url": "https://api.example.com",
+  "base_url_fallbacks": [],
+
+  "default_model": "example-video-v1",
+
+  "auth": {
+    "type": "bearer",
+    "api_key_env": "EXAMPLE_VIDEO_API_KEY"
+  },
+
+  "media_mode": "base64",
+
+  "model_aliases": {},
+
+  "create": {
+    "method": "POST",
+    "path": "/v1/videos/generations",
+    "task_id_path": "data.task_id",
+    "timeout_seconds": 30
+  },
+
+  "query": {
+    "method": "GET",
+    "path_template": "/v1/videos/generations/{task_id}",
+    "params": { "model": "{model}" },
+    "model_param": "model",
+    "timeout_seconds": 30
+  },
+
+  "payload": {
+    "prompt_field": "prompt",
+    "model_field": "model",
+    "duration_field": "duration",
+    "resolution_field": "resolution",
+    "ratio_field": "ratio",
+    "first_frame_field": "first_frame_image",
+    "last_frame_field": "last_frame_image",
+    "reference_images_field": "reference_images",
+    "reference_videos_field": "reference_videos",
+    "reference_audios_field": "reference_audios"
+  },
+
+  "callback_field": "callback_url",
+
+  "status_map": {
+    "pending": "queued",
+    "queued": "queued",
+    "processing": "running",
+    "running": "running",
+    "in_progress": "running",
+    "completed": "succeeded",
+    "succeeded": "succeeded",
+    "success": "succeeded",
+    "done": "succeeded",
+    "failed": "failed",
+    "error": "failed",
+    "canceled": "cancelled",
+    "cancelled": "cancelled"
+  },
+
+  "result": {
+    "status_path": "data.status",
+    "video_url_path": "data.video_url",
+    "error_code_path": "data.error_code",
+    "error_message_path": "data.error_message",
+    "model_path": "data.model",
+    "usage_path": "data.usage",
+    "list_path": "items"
+  },
+
+  "rules": {
+    "prompt_max_chars": 7000,
+    "duration_required": false,
+    "duration_range": null,
+    "resolution_required": false,
+    "ratio_required_for_text_only": false,
+    "ratio_forbidden_for_text_only": [],
+    "last_frame_requires_first_frame": false,
+    "max_reference_images": 9,
+    "max_reference_videos": 3,
+    "max_reference_audios": 3
+  },
+
+  "video_model_hints": ["video", "hailuo", "kling", "vidu", "seedance", "sora", "veo"],
+
+  "extra_endpoints": {
+    "list_tasks": {
+      "method": "GET",
+      "path": "/v1/videos/generations",
+      "params": { "page_num": "1", "page_size": "20" },
+      "timeout_seconds": 30
+    },
+    "list_models": {
+      "method": "GET",
+      "path": "/v1/models",
+      "timeout_seconds": 30
+    },
+    "regenerate_2k": {
+      "method": "POST",
+      "path": "/v1/videos/generations",
+      "timeout_seconds": 60
+    },
+    "delete_task": {
+      "method": "DELETE",
+      "path_template": "/v1/videos/generations/{task_id}",
+      "timeout_seconds": 30
+    }
+  }
+}

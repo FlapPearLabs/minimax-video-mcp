@@ -1,0 +1,29 @@
+# ── 密钥：永远不要提交 ─────────────────────────────
+api.txt
+apikey.txt
+api_key.txt
+*.key
+.env
+.env.*
+
+# ── Python ───────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── 本地生成物 ───────────────────────────────────
+provider.local.json
+.mcp.json
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,134 @@
+{
+  "_说明": "七七八AI（ai778.cc）· MiniMax 官方视频格式 V2 透传。改 base_url 即可换域名。",
+
+  "name": "778ai-minimax-video",
+  "profile": "minimax_v2",
+
+  "base_url": "https://api.lk888.ai",
+  "base_url_fallbacks": ["https://ai778.cc/houduan"],
+
+  "connect_timeout_seconds": 20,
+
+  "default_model": "MiniMax-H3",
+  "regeneration_model": "MiniMax-H3",
+
+  "auth": {
+    "type": "bearer",
+    "api_key_file": "api.txt",
+    "api_key_env": "VIDEO_API_KEY"
+  },
+
+  "media_mode": "base64",
+
+  "model_aliases": {
+    "MiniMax-H3": "MiniMax-H3",
+    "MiniMax-H3-Max": "MiniMax-H3-Max"
+  },
+
+  "create": {
+    "method": "POST",
+    "path": "/v2/video_generation",
+    "task_id_path": "task_id",
+    "timeout_seconds": 60
+  },
+
+  "query": {
+    "method": "GET",
+    "path_template": "/v2/query/video_generation/{task_id}",
+    "timeout_seconds": 30
+  },
+
+  "content_array": {
+    "field": "content"
+  },
+
+  "roles": {
+    "input_image": { "type": "image_url", "url_container": "image_url", "role": "first_frame" },
+    "last_frame_image": { "type": "image_url", "url_container": "image_url", "role": "last_frame" },
+    "reference_images": { "type": "image_url", "url_container": "image_url", "role": "reference_image" },
+    "reference_videos": { "type": "video_url", "url_container": "video_url", "role": "reference_video" },
+    "reference_audios": { "type": "audio_url", "url_container": "audio_url", "role": "reference_audio" }
+  },
+
+  "payload": {
+    "prompt_field": "prompt",
+    "model_field": "model",
+    "duration_field": "duration",
+    "resolution_field": "resolution",
+    "ratio_field": "ratio"
+  },
+
+  "callback_field": "callback_url",
+
+  "status_map": {
+    "queued": "queued",
+    "pending": "queued",
+    "running": "running",
+    "processing": "running",
+    "succeeded": "succeeded",
+    "success": "succeeded",
+    "completed": "succeeded",
+    "failed": "failed",
+    "error": "failed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled"
+  },
+
+  "result": {
+    "status_path": "task.status",
+    "video_url_path": "task.content.url",
+    "error_code_path": "task.error.code",
+    "error_message_path": "task.error.message",
+    "model_path": "task.model",
+    "usage_path": "task.usage",
+    "list_path": "items"
+  },
+
+  "rules": {
+    "prompt_max_chars": 7000,
+    "duration_required": true,
+    "duration_range": [4, 15],
+    "resolution_required": true,
+    "ratio_required_for_text_only": true,
+    "ratio_forbidden_for_text_only": ["adaptive"],
+    "last_frame_requires_first_frame": true,
+    "max_reference_images": 9,
+    "max_reference_videos": 3,
+    "max_reference_audios": 3
+  },
+
+  "video_model_hints": [
+    "hailuo", "minimax-h3", "video", "kling", "vidu", "seedance", "wan",
+    "pixverse", "gk-video", "omni", "happyhorse", "sora", "veo", "runway"
+  ],
+
+  "known_video_models": [
+    "MiniMax-H3", "MiniMax-H3-Max", "minimax-h3", "minimax-h3-max",
+    "hailuo-h3-cankaosheng", "hailuo-h3-shouweizhen", "hailuo-h3-quannengcankao",
+    "hailuo-h3-zaishengcheng"
+  ],
+
+  "extra_endpoints": {
+    "list_tasks": {
+      "method": "GET",
+      "path": "/v2/query/video_generation",
+      "params": { "page_num": "1", "page_size": "20" },
+      "timeout_seconds": 30
+    },
+    "list_models": {
+      "method": "GET",
+      "path": "/v1/models",
+      "timeout_seconds": 30
+    },
+    "regenerate_2k": {
+      "method": "POST",
+      "path": "/v2/video_regeneration",
+      "timeout_seconds": 60
+    },
+    "delete_task": {
+      "method": "DELETE",
+      "path_template": "/v2/video_generation/{task_id}",
+      "timeout_seconds": 30
+    }
+  }
+}
