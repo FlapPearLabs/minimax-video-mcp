@@ -3,6 +3,19 @@
 > 对抗式代码审查，独立 clone、独立写探针，未使用真实 API key、未发起计费生成。
 > 审查简报见 `docs/REVIEW-BRIEF.md`。
 
+> ⚠️ **2026-10 后续更正**（针对 Q1 的"官方能力边界"判断，不影响本报告的代码审查结论）：
+> 后续实测发现两点需要修正 ——
+> ① 本报告把 **Hub agent** 列为 `minimax-video` 插件的硬阻断，实际上 `hub_*` 属于**另一个插件**
+>    `minimax-h3-skills`；在 `minimax-video` 插件全目录 grep `hub_generate_video|hub_video_edit|hub_canvas` **零命中**。
+> ② 本报告把 **openchatcut 编辑层**判为"换服务商后的结构性缺口"。实际上 `minimax-video` 插件就是
+>    **OpenChatCut v0.2.16（`2e6f4a29`，AGPL-3.0-or-later）的改造版**，其官方补丁 `upstream.patch`（161KB）
+>    里搜 `baseURL|apiKey|minimax.cn|video_generation` **零命中** —— 编辑层纯本地、与服务商无关，
+>    保留官方插件即原样保留。
+> ③ 顺带澄清本报告提出的 **AGPL-3.0 合规风险**：该约束只在**再分发** openchatcut 代码时成立；
+>    自用、或仅保留官方插件 + 另写生成适配器，不触发该义务。
+> 完整取证见 [`官方视频能力边界-实测.md`](官方视频能力边界-实测.md)。
+> **本报告的代码审查结论仍然有效并已修复。**
+
 ---
 
 ## Q1 官方视频能力边界

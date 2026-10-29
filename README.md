@@ -6,9 +6,12 @@
 Agent（MiniMax Code / Claude Code / Cursor）侧的写法基本不用改。
 
 > ⚠️ **诚实说明**：这是「第三方视频任务适配器」，**不是**官方视频能力的透明替换。
-> 经两轮独立对抗式审查（Codex `gpt-6.1-sol`@high / WorkBuddy `claude-opus-4-6-thinking`）
-> 实测确认，官方视频能力里有一部分**无法通过换服务商保留** —— 详见
-> [「与官方视频能力的差距」](#与官方视频能力的差距实测)。
+> 实测确认，官方视频能力里有一部分**无法通过换服务商保留**（生成工具的云端执行体、
+> Lucid 配音的 CLI 路径、Hub 编排、多媒体矩阵、Drive 资产）—— 详见
+> [「与官方视频能力的差距」](#与官方视频能力的差距实测2026-10-复核)。
+>
+> 另：**视频编辑能力（多轨剪辑 / 字幕 / 模板 / 剪映导出）本来就与服务商无关**，
+> 它是官方 `minimax-video` 插件自带的 OpenChatCut 改造版，保留官方插件即原样保留。
 
 > **你只需要做一件事：把 API Key 写进 `api.txt`。**
 > 别的什么都不用改、什么都不用配。
@@ -111,26 +114,52 @@ Agent 读完会自己完成克隆、读 key、注册、验证。你也可以直�
 
 ---
 
-## 与官方视频能力的差距（实测）
+## 与官方视频能力的差距（实测，2026-10 复核）
 
-两轮独立对抗式审查（各自 fresh clone、各自写探针、互不通气）的**一致结论**：
+> 完整取证（含路径、行号、原文）见 [`docs/官方视频能力边界-实测.md`](docs/官方视频能力边界-实测.md)。
+>
+> **先纠正一个早期误判**：早期版本把「视频编辑工程（openchatcut）」列为换服务商后的结构性缺口，
+> 这是**错的**。`minimax-video` 插件就是 **OpenChatCut v0.2.16（`2e6f4a29`，AGPL-3.0-or-later）的改造版**，
+> 官方补丁（161KB `upstream.patch`）里搜 `baseURL|apiKey|minimax.cn|video_generation` **零命中** ——
+> 编辑层**纯本地运行、与服务商完全无关**，保留官方插件即原样保留。
+> 同理，`hub_*` 属于**另一个插件** `minimax-h3-skills`，`minimax-video` 全目录 grep `hub_*` **零命中**。
 
-> **当前项目不能达到「除了服务商不同、其余与官方完全等价」。**
+### 官方视频能力的真实分层
 
-### 换服务商后能原样保留的（本项目已覆盖）
+| 层 | 由谁提供 | 与服务商的关系 |
+| --- | --- | --- |
+| 视频**编辑**（多轨 / 字幕 / 特效 / 模板 / 剪映导出 / 草稿审阅） | `minimax-video` 插件内置 OpenChatCut，本机 `127.0.0.1` MCP | **无关**，纯本地 |
+| 视频**生成** | 宿主 Agent 调 `connector__matrix__submit_video_generation`，执行体在 `agent.minimax.cn` | **锁死在云端** ← 唯一要换的东西 |
+| Hub 编排（`hub_*`） | `minimax-h3-skills` 插件（另一个插件） | 需 Hub 服务端 |
+| Drive 资产 | MiniMax 云 | 云端专属 |
 
-- 视频**生成**：异步提交 → 轮询 → 取成片，参数与官方 V2 同形
-- 首尾帧 / 参考图 / 参考视频 / 参考音频 的多模态输入组装
-- 成片转存、本地台账、防重复扣费（比官方还多一层）
+官方插件**主动剥离**了生成后端（`miniapp.ts:2` "Mini App 只装配编辑/媒体能力；推理由宿主 Agent 承担"；
+`miniapp-server.ts:9` "不导入 embedded-server：它会带入独立 Agent 与云生成后端"；`/api/keys` 返回空），
+所以生成必须借宿主的 connector 工具，而那个工具在云端执行。
 
-### 换服务商后**保留不了**的（结构性缺口，不是"补代码"能解决的）
+### 换服务商后**保不住**的（修订版）
 
 | 缺口 | 性质 | 证据 |
 | --- | --- | --- |
-| **Hub agent 运行时**（`hub_generate_video` / `hub_video_edit` / `hub_canvas_*`） | **服务端封闭组件**，本机无实现，grep 整个 `.minimax` 找不到。本地换不掉 | 官方 H3 skills 的 frontmatter 自述 *"Requires the MiniMax Hub agent… not portable to generic agent harnesses"*；9 个 skill 里 8 个依赖它 |
-| **视频编辑工程**（`openchatcut` MCP：时间线读写、素材池、模板、剪映导出） | 是独立的 NLE 应用 + Node 后端（Remotion / ffmpeg / sqlite-vec），不是加个工具能补的 | 官方 `minimax-video` 插件 `servers.mcp.json` |
-| **多媒体矩阵**（`videos_understand` / `generate_image` / `synthesize_speech` / `batch_text_to_music` / `audios_understand` …） | 本项目未实现；且中转站是否支持这些路由**未验证**（需真实 key 探测） | `mcode-tools connector tools` 实测 19 个工具 |
-| **Drive 资产生命周期**（`node_id` + `get_asset_url`） | 官方 query 返回 `node_id`/`file_name` 再换短时直链；本项目直接返回 `video_url` | 官方连接器 schema |
+| 宿主 connector 工具的**执行体** | `mcode-tools connector call` → `agent.minimax.cn/minimax-cloud/api/v1/connectors/tools/call`，OAuth 认证，扣 MiniMax 账号额度。`mcode-tools` 只有 4 个子命令、无改指向入口；`~/.minimax` 无 connector 配置 | `cli.mjs:23235-23236` |
+| `mcode-tools connector` **CLI 路径**（Lucid 配音） | skill 直接 shell 调 `mcode-tools connector tool connector__matrix__synthesize_speech`，只到云端，本地替换不了 | `skills/lucid/capabilities/mcode/voice.md:7` |
+| Hub agent 运行时 | 服务端封闭组件；属于 `minimax-h3-skills`（9 个 skill 里 8 个依赖它），**不属于** `minimax-video` | H3 skills frontmatter；`minimax-video` 内 grep `hub_*` 零命中 |
+| 多媒体矩阵 | 本项目未实现；中转站是否支持未验证（`GET /v1/skills` 需真实 key 才能读） | `mcode-tools connector tools` 实测 19 个工具 |
+| Drive 资产生命周期 | `node_id` + `get_asset_url` 是云端专属 | 官方连接器 schema |
+
+### 一条真实的协议落差（也是本仓库存在的理由）
+
+上游 OpenChatCut 的 MiniMax provider **base URL 可配**（`MINIMAX_BASE_URL`，见 `server/plugins/index.ts:130-134`），
+但走 **V1**（`/v1/video_generation`、`/v1/query/video_generation?task_id=`、`/v1/files/retrieve?file_id=`）；
+中转站 `/v2/*` **只有 MiniMax 官方 V2 格式**，`/v1/*` 是 OpenAI 兼容的 chat/messages/skills，
+**不提供** MiniMax V1 视频路径（实测 404）。
+→ 直接把 `MINIMAX_BASE_URL` 指过去会 404，必须做 **V1→V2 改写**。**这正是本仓库 `server.py` 在做的事。**
+
+### 换服务商后能原样保留的
+
+- 视频**编辑**全线：多轨剪辑、字幕、特效、模板、剪映草稿导出、草稿 → 预览 → 应用（官方插件自带，本机跑）
+- 代码动画：`code-video` / `lucid` 的本地 Python + Remotion 渲染
+- 视频**生成**的参数与异步流程（本项目已对齐官方 V2 同形，并多一层台账 / 防重复扣费）
 
 ### 已按审查意见修掉的（本仓库）
 
@@ -144,15 +173,19 @@ Agent 读完会自己完成克隆、读 key、注册、验证。你也可以直�
 
 | 路线 | 达成度 | 说明 |
 | --- | --- | --- |
-| A 换官方上游 | ~30% | 能换 connector 层，但 Hub 换不掉、H3 skills 跑不了；还要改官方安装物 |
-| B 自建完全兼容 MCP | ~55% | 补齐 11 个媒体工具 + 返回契约；Hub 依赖仍在 |
-| C 改官方 skills | ~5% | 改工具名解决不了 canvas / 选择卡片这类运行时依赖 |
+| A 换官方上游 | ~35% | 能换 connector 层，但宿主侧没有改指向入口（baseURL 硬编码 + 启动器清空环境变量）；Hub 换不掉 |
+| B 自建完全兼容 MCP | ~60% | 补齐多媒体工具 + 返回契约；Hub 与 Drive 仍缺 |
+| C 改官方 skills | ~10% | 改工具名解决不了 canvas / 选择卡片这类运行时依赖 |
 | **D 别名 + 宿主路由层** | **最合理** | 在宿主分发层同时接住 Connector 调用与 CLI 调用，把请求转进适配器；前提是找得到官方扩展点 |
-| E = B + 集成 openchatcut | ~70% | 能补上编辑能力；但 openchatcut 是 **AGPL-3.0**，直接集成有合规风险 |
+| **F = 官方插件 + 本地适配器接管生成**（= 本仓库当前形态） | **~75%** | 编辑层用官方插件（不碰 AGPL 再分发义务），生成层走中转站；待验证宿主对 MCP 工具的命名与优先级 |
+| E 自建 openchatcut 集成 | ~70% | 能补编辑能力，但要给上游 MiniMax provider 打 V1→V2 补丁 + 承担 AGPL 再分发义务；**性价比低于 F** |
 
-**下一步该做的不是继续补工具名**，而是这两件事之一：
-① 用真实 key 探测中转站到底支持哪些路由（不花钱，只看 401→200）；
-② 在正常运行的 MiniMax Code 环境里导出 Connector / Hub 的实时契约与可替换入口。
+**下一步该做的不是继续补工具名**，而是这三件事：
+① 用真实 key 读 `GET /v1/skills`，确认中转站覆盖哪些路由（不花钱）；
+② 在实机里确认宿主对 MCP 工具的命名规则，以及同名工具的优先级（内置 connector 工具是裸名 `connector__matrix__*`）；
+③ （可选）若要把"视频修改"完全对齐，补 `/v2/video_regeneration` 与 `DELETE /v2/video_generation/{task_id}`。
+
+> 中转站已明确 **H3-Context-IR 未开放**（`POST /v2/h3_context_ir` → 400），官方 H3 的"上下文续写"这一项接不了。
 
 ---
 

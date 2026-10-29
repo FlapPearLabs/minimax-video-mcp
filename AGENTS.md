@@ -161,18 +161,32 @@ model=MiniMax-H3, duration=4, resolution=768P, ratio=16:9, prompt=一句话
 
 ## ⚠️ 别对用户说"和官方一模一样"
 
-经两轮独立对抗式审查实测确认，官方视频能力里有一部分**换服务商就保不住**：
+2026-10 复核（取证见 `docs/官方视频能力边界-实测.md`）后，缺口清单**已修订**。
+
+早期文档的两个误判在此更正：
+* 「视频编辑工程（openchatcut）是换服务商后的结构性缺口」→ **错**。`minimax-video` 插件就是
+  **OpenChatCut v0.2.16（`2e6f4a29`，AGPL-3.0-or-later）的改造版**，编辑层纯本地、与服务商无关；
+  官方补丁 `upstream.patch` 里搜 `baseURL|apiKey|minimax.cn|video_generation` **零命中**。保留官方插件即原样保留。
+* 「Hub agent 是 `minimax-video` 的硬阻断」→ **错**。`hub_*` 属于**另一个插件** `minimax-h3-skills`，
+  `minimax-video` 全目录 grep `hub_*` **零命中**。
+
+真正换服务商后**保不住**的只有这几条：
 
 | 缺口 | 性质 |
 | --- | --- |
-| Hub agent 运行时（`hub_generate_video` / `hub_video_edit` / `hub_canvas_*`） | 服务端封闭组件，本机无实现，**本地换不掉**。9 个 H3 skills 里 8 个依赖它 |
-| 视频编辑工程（`openchatcut` MCP：时间线/素材池/模板/剪映导出） | 独立 NLE 应用 + Node 后端，不是加个工具能补的 |
-| 多媒体矩阵（`videos_understand` / `generate_image` / TTS / 音乐 / 音频理解） | 本项目未实现；中转站是否支持这些路由未验证 |
+| 宿主 connector 工具的**执行体**（`connector__matrix__submit_video_generation` 等） | 在 `agent.minimax.cn` 云端执行（`cli.mjs:23235-23236`），OAuth 认证、扣 MiniMax 账号额度；`mcode-tools` 无改指向入口。**本仓库存在的理由就是替换这一层** |
+| `mcode-tools connector` **CLI 路径**（Lucid 配音 `voice.provider=mcode`） | skill 直接 shell 调 `mcode-tools connector tool connector__matrix__synthesize_speech`，只到云端 |
+| Hub agent 运行时（`hub_*`） | 服务端封闭组件，属 `minimax-h3-skills`（9 个 skill 里 8 个依赖） |
+| 多媒体矩阵（`videos_understand` / `generate_image` / TTS / 音乐 / 音频理解） | 本项目未实现；中转站是否支持未验证（`GET /v1/skills` 需真实 key） |
 | Drive 资产生命周期（`node_id` + `get_asset_url`） | 官方返回 `node_id`/`file_name` 再换短时直链；本项目直接返回 `video_url` |
 
-准确说法：**视频生成这条线对齐了；视频理解、视频编辑、Hub 编排、多媒体矩阵这四条线没有。**
+准确说法：**视频编辑与代码动画原样保留（官方插件自带）；视频生成这条线由本项目接管并对齐官方 V2；
+生成工具的云端执行体、Lucid 配音 CLI 路径、Hub 编排、多媒体矩阵、Drive 资产这五条接不上。**
 
-详见 README 的「与官方视频能力的差距（实测）」一节。
+另注：上游 OpenChatCut 的 MiniMax provider base URL 可配（`MINIMAX_BASE_URL`）但走 **V1**，
+中转站 `/v2/*` 只认 **V2**（V1 实测 404）→ 必须 V1→V2 改写，`server.py` 已在做。
+
+详见 README 的「与官方视频能力的差距（实测，2026-10 复核）」一节。
 
 ## 三条铁律（代码里已实现，不只是文档约定）
 
