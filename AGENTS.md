@@ -145,8 +145,8 @@ model=MiniMax-H3, duration=4, resolution=768P, ratio=16:9, prompt=一句话
 
 这些工具名与官方 `connector__matrix__*` 对齐，改名会让 Agent 侧的调用习惯断掉：
 
-- `submit_video_generation(prompt, model, duration, resolution, ratio, input_image, last_frame_image, reference_images, reference_videos, reference_audios, callback_url)`
-- `query_video_generation(task_id, model)`
+- `submit_video_generation` —— **同时**以 `connector__matrix__submit_video_generation` 暴露（官方命名空间别名）
+- `query_video_generation` —— **同时**以 `connector__matrix__query_video_generation` 暴露
 - `list_video_tasks(page_num, page_size, status, model)`
 - `list_video_models(keyword, video_only)`
 - `regenerate_video_2k(source_task_id, base_video_url, resolution)`
@@ -158,6 +158,21 @@ model=MiniMax-H3, duration=4, resolution=768P, ratio=16:9, prompt=一句话
 - `download_video(video_url, task_id)` —— 手动转存成片
 - `list_local_tasks(status, limit)` —— 查本机台账（找回之前提交过的任务）
 - `resume_pending_tasks(limit)` —— 续跑所有未到终态的任务
+
+## ⚠️ 别对用户说"和官方一模一样"
+
+经两轮独立对抗式审查实测确认，官方视频能力里有一部分**换服务商就保不住**：
+
+| 缺口 | 性质 |
+| --- | --- |
+| Hub agent 运行时（`hub_generate_video` / `hub_video_edit` / `hub_canvas_*`） | 服务端封闭组件，本机无实现，**本地换不掉**。9 个 H3 skills 里 8 个依赖它 |
+| 视频编辑工程（`openchatcut` MCP：时间线/素材池/模板/剪映导出） | 独立 NLE 应用 + Node 后端，不是加个工具能补的 |
+| 多媒体矩阵（`videos_understand` / `generate_image` / TTS / 音乐 / 音频理解） | 本项目未实现；中转站是否支持这些路由未验证 |
+| Drive 资产生命周期（`node_id` + `get_asset_url`） | 官方返回 `node_id`/`file_name` 再换短时直链；本项目直接返回 `video_url` |
+
+准确说法：**视频生成这条线对齐了；视频理解、视频编辑、Hub 编排、多媒体矩阵这四条线没有。**
+
+详见 README 的「与官方视频能力的差距（实测）」一节。
 
 ## 三条铁律（代码里已实现，不只是文档约定）
 

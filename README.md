@@ -2,8 +2,13 @@
 
 把 **MiniMax Code 的视频生成能力**接到第三方中转站上。
 
-工具名、参数、调用流程与 MiniMax 内置的 `matrix` 视频连接器**完全一致**，
-Agent（MiniMax Code / Claude Code / Cursor）侧的写法一个字都不用改。
+工具名、参数、调用流程**对齐** MiniMax 内置的 `matrix` 视频连接器，
+Agent（MiniMax Code / Claude Code / Cursor）侧的写法基本不用改。
+
+> ⚠️ **诚实说明**：这是「第三方视频任务适配器」，**不是**官方视频能力的透明替换。
+> 经两轮独立对抗式审查（Codex `gpt-6.1-sol`@high / WorkBuddy `claude-opus-4-6-thinking`）
+> 实测确认，官方视频能力里有一部分**无法通过换服务商保留** —— 详见
+> [「与官方视频能力的差距」](#与官方视频能力的差距实测)。
 
 > **你只需要做一件事：把 API Key 写进 `api.txt`。**
 > 别的什么都不用改、什么都不用配。
@@ -103,6 +108,51 @@ Agent 读完会自己完成克隆、读 key、注册、验证。你也可以直�
 | `download_video` | 手动把成片直链转存到本地 | — |
 | `list_local_tasks` | 查本机台账，找回之前提交过的任务 | — |
 | `resume_pending_tasks` | 续跑所有未到终态的任务 | — |
+
+---
+
+## 与官方视频能力的差距（实测）
+
+两轮独立对抗式审查（各自 fresh clone、各自写探针、互不通气）的**一致结论**：
+
+> **当前项目不能达到「除了服务商不同、其余与官方完全等价」。**
+
+### 换服务商后能原样保留的（本项目已覆盖）
+
+- 视频**生成**：异步提交 → 轮询 → 取成片，参数与官方 V2 同形
+- 首尾帧 / 参考图 / 参考视频 / 参考音频 的多模态输入组装
+- 成片转存、本地台账、防重复扣费（比官方还多一层）
+
+### 换服务商后**保留不了**的（结构性缺口，不是"补代码"能解决的）
+
+| 缺口 | 性质 | 证据 |
+| --- | --- | --- |
+| **Hub agent 运行时**（`hub_generate_video` / `hub_video_edit` / `hub_canvas_*`） | **服务端封闭组件**，本机无实现，grep 整个 `.minimax` 找不到。本地换不掉 | 官方 H3 skills 的 frontmatter 自述 *"Requires the MiniMax Hub agent… not portable to generic agent harnesses"*；9 个 skill 里 8 个依赖它 |
+| **视频编辑工程**（`openchatcut` MCP：时间线读写、素材池、模板、剪映导出） | 是独立的 NLE 应用 + Node 后端（Remotion / ffmpeg / sqlite-vec），不是加个工具能补的 | 官方 `minimax-video` 插件 `servers.mcp.json` |
+| **多媒体矩阵**（`videos_understand` / `generate_image` / `synthesize_speech` / `batch_text_to_music` / `audios_understand` …） | 本项目未实现；且中转站是否支持这些路由**未验证**（需真实 key 探测） | `mcode-tools connector tools` 实测 19 个工具 |
+| **Drive 资产生命周期**（`node_id` + `get_asset_url`） | 官方 query 返回 `node_id`/`file_name` 再换短时直链；本项目直接返回 `video_url` | 官方连接器 schema |
+
+### 已按审查意见修掉的（本仓库）
+
+- 工具名**同时**以 `submit_video_generation` 和 `connector__matrix__submit_video_generation` 暴露
+- `list_video_tasks` 的分页参数不再被配置默认值覆盖
+- 台账写失败时**中止提交**（而不是受理后丢 task_id）
+- 升 2K 补上提交前 attempt 记录
+- 回归测试：`tests/test_review_fixes.py`（7 个用例，逐条钉住上面的修复）
+
+### 想真正达到"完全等价"，得走哪条路
+
+| 路线 | 达成度 | 说明 |
+| --- | --- | --- |
+| A 换官方上游 | ~30% | 能换 connector 层，但 Hub 换不掉、H3 skills 跑不了；还要改官方安装物 |
+| B 自建完全兼容 MCP | ~55% | 补齐 11 个媒体工具 + 返回契约；Hub 依赖仍在 |
+| C 改官方 skills | ~5% | 改工具名解决不了 canvas / 选择卡片这类运行时依赖 |
+| **D 别名 + 宿主路由层** | **最合理** | 在宿主分发层同时接住 Connector 调用与 CLI 调用，把请求转进适配器；前提是找得到官方扩展点 |
+| E = B + 集成 openchatcut | ~70% | 能补上编辑能力；但 openchatcut 是 **AGPL-3.0**，直接集成有合规风险 |
+
+**下一步该做的不是继续补工具名**，而是这两件事之一：
+① 用真实 key 探测中转站到底支持哪些路由（不花钱，只看 401→200）；
+② 在正常运行的 MiniMax Code 环境里导出 Connector / Hub 的实时契约与可替换入口。
 
 ---
 

@@ -658,7 +658,10 @@ def _wait_for_downloads(timeout: float = 30.0) -> None:
 # --------------------------------------------------------------------------
 # 工具
 # --------------------------------------------------------------------------
-@mcp.tool()
+# 同时用官方命名空间暴露一份：按 connector__matrix__* 查找工具的 Agent 能直接命中，
+# 而不影响现有的裸名调用。
+@mcp.tool(name="submit_video_generation")
+@mcp.tool(name="connector__matrix__submit_video_generation")
 def submit_video_generation(
     prompt: str,
     model: Optional[str] = None,
@@ -719,7 +722,7 @@ def submit_video_generation(
     # 万一上游受理了但响应丢了（超时/断网），我们至少知道"有个提交可能成功了"。
     # 这时候**不要盲目重提**（重提 = 再扣一次钱），先去平台任务列表里查。
     attempt_id = _journal().new_attempt_id()
-    _journal().record(
+    attempt_written = _journal().record(
         attempt_id,
         kind="attempt",
         event="submit_attempt",
@@ -730,6 +733,13 @@ def submit_video_generation(
         resolution=payload.get("resolution"),
         ratio=payload.get("ratio"),
     )
+    if attempt_written is None:
+        # 台账写不进去 = 任务一旦受理就再也找不回来 = 白花钱。
+        # 与其冒险提交，不如直接中止并把原因说清楚。
+        raise RuntimeError(
+            f"台账写入失败（{_journal().last_error}），已中止提交以免丢失 task_id。"
+            f"请检查台账目录是否可写：{_journal().path.parent}"
+        )
 
     # ⚠️ 创建任务的 POST 绝不重试、绝不换域名重发。
     # 上游一旦受理就计费；重试 = 可能多出一个计费任务，而第一个 task_id 我们拿不到。
@@ -801,7 +811,8 @@ def submit_video_generation(
     }
 
 
-@mcp.tool()
+@mcp.tool(name="query_video_generation")
+@mcp.tool(name="connector__matrix__query_video_generation")
 def query_video_generation(task_id: str, model: Optional[str] = None) -> Dict[str, Any]:
     """查询一个视频生成任务的当前状态与结果。
 
@@ -1024,13 +1035,16 @@ def list_video_tasks(
     spec = (CONFIG.get("extra_endpoints") or {}).get("list_tasks")
     if not spec:
         return {"items": [], "total": 0, "reason": "provider.json 未配置 list_tasks"}
-    params: Dict[str, Any] = {"page_num": str(page_num), "page_size": str(page_size)}
+    params: Dict[str, Any] = {}
     for k, v in (spec.get("params") or {}).items():
         if isinstance(v, str):
             v = v.replace("{model}", model or "")
             if v == "":
                 continue
         params[k] = v
+    # 调用参数优先于配置里的默认值 —— 否则 page_num/page_size 会被固定值盖掉
+    params["page_num"] = str(page_num)
+    params["page_size"] = str(page_size)
     if status:
         params["filter.status"] = status
     if model:
@@ -1144,6 +1158,24 @@ def regenerate_video_2k(
             {"type": "video_url", "role": "base_video", "video_url": {"url": base_video_url}}
         ]
 
+    # ── 铁律一：升 2K 同样是计费任务，**提交前**先记 attempt ──────
+    journal = _journal()
+    attempt_id = journal.new_attempt_id()
+    attempt_written = journal.record(
+        attempt_id,
+        kind="attempt",
+        event="regenerate_attempt",
+        status="submitting",
+        model=body.get("model"),
+        resolution=body.get("resolution"),
+        source_task_id=source_task_id,
+    )
+    if attempt_written is None:
+        raise RuntimeError(
+            f"台账写入失败（{journal.last_error}），已中止升 2K 以免丢失 task_id。"
+            f"请检查台账目录是否可写：{journal.path.parent}"
+        )
+
     resp = _request(
         spec.get("method", "POST"),
         spec["path"],
@@ -1154,8 +1186,7 @@ def regenerate_video_2k(
     )
     task_id = _extract_task_id(resp, CONFIG.get("create", {}))
 
-    # ── 铁律一：升 2K 也是一个计费任务，同样必须落库 ──────────
-    journal = _journal()
+    # ── 铁律一：拿到 task_id 立刻落库 ────────────────────────────
     written = journal.record(
         task_id,
         kind="task",
@@ -1165,6 +1196,14 @@ def regenerate_video_2k(
         resolution=body.get("resolution"),
         source_task_id=source_task_id,
         request_payload=body,
+        attempt_id=attempt_id,
+    )
+    journal.record(
+        attempt_id,
+        kind="attempt",
+        event="resolved",
+        status="resolved",
+        resolved_task_id=task_id,
     )
     if written is None:
         print(
