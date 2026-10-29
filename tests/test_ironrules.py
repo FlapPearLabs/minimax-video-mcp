@@ -64,9 +64,17 @@ class TestRule1TaskIdPersisted(IronRuleCase):
             for l in self.journal_path().read_text(encoding="utf-8").splitlines()
             if l.strip()
         ]
-        self.assertTrue(any(r["task_id"] == sub["task_id"] for r in lines))
-        self.assertEqual(lines[0]["status"], "queued")
-        self.assertEqual(lines[0]["event"], "submitted")
+        rows = [r for r in lines if r["task_id"] == sub["task_id"]]
+        self.assertTrue(rows, "task_id 必须立刻落库")
+        self.assertEqual(rows[0]["status"], "queued")
+        self.assertEqual(rows[0]["event"], "submitted")
+        # 另外还有「提交尝试」记录（上游可能受理但响应丢了时靠它判断）
+        attempt_rows = [r for r in lines if r.get("kind") == "attempt"]
+        attempt_ids = {r["task_id"] for r in attempt_rows}
+        self.assertEqual(len(attempt_ids), 1, "应有且只有一个提交尝试号")
+        self.assertEqual(attempt_rows[0]["status"], "submitting")
+        self.assertEqual(attempt_rows[-1]["status"], "resolved")
+        self.assertEqual(attempt_rows[-1]["resolved_task_id"], sub["task_id"])
 
     def test_query_updates_journal_status(self):
         sub = self.submit()
@@ -169,42 +177,45 @@ class TestRule3DownloadOnSuccess(IronRuleCase):
         self.server.query_video_generation(task_id=sub["task_id"], model="MiniMax-H3")
         res = self.server.query_video_generation(task_id=sub["task_id"], model="MiniMax-H3")
         self.assertEqual(res["status"], "succeeded")
-        return sub, res
+        # 转存在后台线程里跑，等它落定
+        self.server._wait_for_downloads(30)
+        rec = self.server._journal().get(sub["task_id"]) or {}
+        return sub, res, rec
 
     def test_success_triggers_automatic_download(self):
-        sub, res = self._succeed()
-        self.assertIn("local_path", res, "成功后必须自动转存")
-        local = Path(res["local_path"])
+        sub, res, rec = self._succeed()
+        self.assertEqual(res.get("download_status"), "started")
+        self.assertIn("local_path", rec, "成功后必须自动转存并记进台账")
+        local = Path(rec["local_path"])
         self.assertTrue(local.exists(), "成片文件必须真的落盘")
         self.assertGreater(local.stat().st_size, 0)
         self.assertEqual(local.parent.name, "videos")
 
     def test_download_is_idempotent(self):
-        sub, res = self._succeed()
+        sub, res, rec = self._succeed()
         downloads_after_first = mock_provider.STATS["downloads"]
         self.assertEqual(downloads_after_first, 1)
 
         # 再查一次，不该重复下载
         self.server.query_video_generation(task_id=sub["task_id"], model="MiniMax-H3")
+        self.server._wait_for_downloads(30)
         self.assertEqual(
             mock_provider.STATS["downloads"], downloads_after_first,
             "同一个任务不该重复下载",
         )
 
     def test_journal_records_local_path(self):
-        sub, res = self._succeed()
-        rec = self.server._journal().get(sub["task_id"])
-        self.assertEqual(rec["local_path"], res["local_path"])
+        sub, res, rec = self._succeed()
         self.assertTrue(Path(rec["local_path"]).exists())
 
     def test_download_video_tool(self):
-        sub, res = self._succeed()
+        sub, res, rec = self._succeed()
         again = self.server.download_video(video_url=res["video_url"], task_id=sub["task_id"])
         self.assertTrue(Path(again["local_path"]).exists())
         self.assertGreater(again["bytes"], 0)
 
     def test_download_video_without_task_id_uses_url_stem(self):
-        sub, res = self._succeed()
+        sub, res, rec = self._succeed()
         out = self.server.download_video(video_url=res["video_url"])
         self.assertTrue(Path(out["local_path"]).exists())
         self.assertTrue(Path(out["local_path"]).name.endswith(".mp4"))
@@ -220,8 +231,8 @@ class TestRule3DownloadOnSuccess(IronRuleCase):
         cfg["journal"]["auto_download"] = False
         self.provider_path.write_text(_json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
         self.server = load_server(self.env)
-        sub, res = self._succeed()
-        self.assertNotIn("local_path", res)
+        sub, res, rec = self._succeed()
+        self.assertNotIn("local_path", rec)
         self.assertEqual(mock_provider.STATS["downloads"], 0)
 
 

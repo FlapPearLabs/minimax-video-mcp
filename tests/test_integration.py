@@ -163,18 +163,37 @@ class TestErrorPaths(MockCase):
 
 
 class TestBaseUrlFallback(MockCase):
-    def test_falls_back_to_second_base_url(self):
-        """主域名连不上时自动切到备用域名。"""
+    def test_query_falls_back_to_second_base_url(self):
+        """查询是只读的，主域名连不上时自动切到备用域名。"""
+        # 先在 mock 上正常建一个任务
+        sub = self._submit()
+        # 再把主域名换成死地址，备用留 mock
         cfg = json.loads(self.provider_path.read_text(encoding="utf-8"))
-        cfg["base_url"] = "http://127.0.0.1:9"        # 必然连不上的 discard 端口
+        cfg["base_url"] = "http://127.0.0.1:9"        # 必然连不上的端口
         cfg["base_url_fallbacks"] = [self.base]
         self.provider_path.write_text(
             json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         self.server = load_server(self.env)
         self.assertEqual(self.server._base_candidates(), ["http://127.0.0.1:9", self.base])
-        sub = self._submit()
-        self.assertTrue(sub["task_id"])
+        result = self.server.query_video_generation(task_id=sub["task_id"], model="MiniMax-H3")
+        self.assertIn(result["status"], {"running", "succeeded"})
+
+    def test_create_never_falls_back(self):
+        """创建是计费的：主域名连不上时**不能**换域名重发。
+
+        第一个域名可能已经受理并计费，只是响应没回来。
+        """
+        cfg = json.loads(self.provider_path.read_text(encoding="utf-8"))
+        cfg["base_url"] = "http://127.0.0.1:9"
+        cfg["base_url_fallbacks"] = [self.base]
+        cfg["connect_timeout_seconds"] = 2
+        self.provider_path.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.server = load_server(self.env)
+        with self.assertRaises(RuntimeError):
+            self._submit()
 
     def test_all_base_urls_dead_raises(self):
         cfg = json.loads(self.provider_path.read_text(encoding="utf-8"))
@@ -185,7 +204,7 @@ class TestBaseUrlFallback(MockCase):
         )
         self.server = load_server(self.env)
         with self.assertRaises(RuntimeError) as ctx:
-            self._submit()
+            self.server.query_video_generation(task_id="123", model="MiniMax-H3")
         self.assertIn("failed on all base urls", str(ctx.exception))
 
 

@@ -254,11 +254,3 @@ def resolve_key(
     if not warnings:
         warnings.append("没有找到任何密钥文件")
     return KeyResult(key=None, source="missing", warnings=warnings)
-
-
-def describe_key_source(result: KeyResult) -> str:
-    """给 describe_provider 用的一句话来源说明。"""
-    return {
-        "config": "配置文件内联",
-        "missing": "未找到",
-    }.get(result.source, result.source)

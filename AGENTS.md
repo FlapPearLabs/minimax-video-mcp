@@ -45,8 +45,9 @@ minimax-video-mcp/
 - **删除任务**：`DELETE /v2/video_generation/{task_id}`（只能删已结束的）
 - **768P 升 2K**：`POST /v2/video_regeneration`，body 用 `source_task_id` 或 `content:[{type:"video_url", role:"base_video", video_url:{url}}]`
 - **模型**：`MiniMax-H3`（推荐，全形态：文生/首尾帧/参考生/全能参考，768P~4K，4~15 秒，2K 有声）、`MiniMax-H3-Max`
-- 请求体与 **MiniMax 官方 V2 完全一致**（`model` / `content[]` / `resolution` / `duration` / `ratio` / `callback_url`），
-  所以成片效果与走官方一致
+- 请求体与 **MiniMax 官方 V2 同形**（`model` / `content[]` / `resolution` / `duration` / `ratio` /
+  `callback_url` / `extra` / `aigc_watermark`）—— 同一个模型、同样的参数。
+  但接口行为有九处差异，见下节，**别对用户说"完全一致"**。
 
 ### content[] 角色表
 
@@ -162,13 +163,29 @@ model=MiniMax-H3, duration=4, resolution=768P, ratio=16:9, prompt=一句话
 
 | 铁律 | 实现 |
 | --- | --- |
-| **一、task_id 立刻落库** | 提交成功即写入本地台账 `.video-tasks.jsonl`（追加式事件日志）。换会话、换机器、隔天回来，用 `list_local_tasks` / `resume_pending_tasks` 就能找回任务，**不必重新提交** |
-| **二、终态不要自动重试** | `failed` / `cancelled` 不会被自动重提，续跑时也会跳过。失败任务已自动退款，重试 = 再扣一次钱 |
-| **三、直链拿到就转存** | 任务成功时 `query_video_generation` 自动把成片下载到 `videos/` 目录，并在返回值和台账里给出 `local_path`。直链过期也不怕 |
+| **一、task_id 立刻落库** | 提交**前**记一条「提交尝试」（`kind=attempt`），拿到 task_id **后**立刻写进台账 `.video-tasks.jsonl`。换会话后用 `list_local_tasks` / `resume_pending_tasks` 找回并续跑，**不必重新提交** |
+| **二、终态不要自动重试** | 终态任务不进 pending，续跑跳过。**创建类请求（提交、升 2K）永不重试、永不换域名重发**（`allow_retry=False, allow_fallback=False`）—— 上游受理即计费，重试可能多出计费任务。提交失败会留下「未决提交」记录 |
+| **三、直链拿到就转存** | 任务成功时**后台**下载成片到 `videos/`，台账里出现 `local_path`。不阻塞 MCP 调用（同步下载会堵死 server，客户端超时断连后 Agent 很可能重提 = 再扣一次钱）。失败会记进台账，续跑时重试 |
 
 台账与成片目录都已在 `.gitignore` 里，是本地状态，不进仓库。
 
 MCP server 启动时，如果台账里有未完成任务，会在 stderr 打一条提示 —— 看到它就先 `resume_pending_tasks`，别重新提交。
+
+## 与 MiniMax 官方的九处差异（别对用户说"完全一致"）
+
+中转站不是官方。这九处必须如实告知用户：
+
+1. 不支持 `mm_file://`（素材只能公网 URL 或 `data:` 内联）
+2. **不支持只传 `last_frame`**（必须与 `first_frame` 同传）
+3. `POST /v2/h3_context_ir` **未接入，固定 400**
+4. 多出 `1080P` / `4K`（官方 H3 只有 `480P`/`768P`/`2K`）
+5. `usage` 只给秒数与图片数，**不给 token**
+6. 报错 message 是中文，**末尾不带数字错误码**
+7. `extra.prompt_expansion_mode` 只对 `MiniMax-H3-Max` 生效（官方亦然）
+8. `DELETE` 只能删**已结束**的任务，处理中不能取消
+9. 升 2K 仅 `model=MiniMax-H3` + `resolution=2K`，`source_task_id` 只认部分渠道出的 768P 成片
+
+准确说法：**模型和参数与官方一致，接口行为有上述差异。**
 
 ## 禁止事项
 

@@ -91,6 +91,7 @@
     "resolution_required": true,
     "ratio_required_for_text_only": true,
     "ratio_forbidden_for_text_only": ["adaptive"],
+    "ratio_forbidden_values": [],
     "last_frame_requires_first_frame": true,
     "max_reference_images": 9,
     "max_reference_videos": 3,
@@ -113,8 +114,9 @@
     "path": ".video-tasks.jsonl",
     "auto_download": true,
     "download_dir": "videos",
-    "download_timeout_seconds": 600,
-    "download_max_bytes": 838860800
+    "download_timeout_seconds": 300,
+    "download_max_bytes": 419430400,
+    "download_auth_hosts": []
   },
 
   "extra_endpoints": {

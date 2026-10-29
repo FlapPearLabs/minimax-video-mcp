@@ -30,14 +30,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 try:
     import requests
@@ -153,15 +156,23 @@ def _request(
     params: Optional[Dict[str, Any]] = None,
     timeout: int = 30,
     retries: int = 3,
+    allow_retry: bool = True,
+    allow_fallback: bool = True,
 ) -> Dict[str, Any]:
     """带退避重试的 JSON 请求。
 
-    - 只对 429 / 5xx / 网络错误重试；其余 4xx 直接抛出（避免重复扣费）
-    - 主域名连不上时自动切到备用域名
+    ⚠️ 创建任务的 POST 必须传 allow_retry=False, allow_fallback=False。
+       上游一旦受理就会计费；重试或换域名重发都可能产生**第二个计费任务**，
+       而第一个 task_id 我们拿不到 —— 那就是白花钱且任务丢失。
+
+    - 其余请求：只对 429 / 5xx 重试；其余 4xx 直接抛出
+    - 连接错误（DNS/端口/代理）直接换下一个 base，不做退避重试
     """
     bases = _base_candidates()
     if not bases:
         raise RuntimeError("provider.json 未配置 base_url")
+    if not allow_fallback:
+        bases = bases[:1]
     absolute = str(path).startswith("http")
 
     auth = CONFIG.get("auth", {})
@@ -175,13 +186,14 @@ def _request(
     last_err = "unknown"
     # 连接超时单独设上限：站点挂住时不应该把一次工具调用拖到几分钟
     connect_timeout = CONFIG.get("connect_timeout_seconds")
+    attempts = retries + 1 if allow_retry else 1
 
     for base in bases:
         url = path if absolute else base + path
         attempt_timeout = timeout
         if connect_timeout:
             attempt_timeout = min(timeout, int(connect_timeout))
-        for attempt in range(retries + 1):
+        for attempt in range(attempts):
             try:
                 resp = requests.request(
                     method, url, headers=headers, json=json_body, params=params,
@@ -190,10 +202,10 @@ def _request(
             except requests.RequestException as exc:
                 last_err = f"network error: {exc}"
                 # 连不上（DNS 失败 / 端口不通 / 代理挂了）通常不是瞬时问题，
-                # 立刻换下一个 base，别在同一个死域名上做 4 次退避重试。
+                # 立刻换下一个 base，别在同一个死域名上做退避重试。
                 break
 
-            if resp.status_code in RETRY_STATUS and attempt < retries:
+            if resp.status_code in RETRY_STATUS and attempt < attempts - 1:
                 last_err = f"HTTP {resp.status_code}: {resp.text[:400]}"
                 time.sleep(min(2 ** attempt, 8))
                 continue
@@ -211,7 +223,8 @@ def _request(
                 ) from exc
 
         # 这个域名彻底连不上 -> 试下一个
-        time.sleep(1)
+        if len(bases) > 1:
+            time.sleep(1)
 
     raise RuntimeError(
         f"{method} {path} failed on all base urls {bases}: {last_err}"
@@ -426,6 +439,13 @@ def _build_payload(args: Dict[str, Any]) -> Dict[str, Any]:
     if args.get("callback_url"):
         payload[CONFIG.get("callback_field", "callback_url")] = args["callback_url"]
 
+    # 官方 V2 还有这两个顶层字段，中转站也透传 —— 补上才能真正"和官方一致"
+    # extra: {"prompt_expansion_mode": "disabled"|"balanced"|"quality"}（只对 H3-Max 生效）
+    if args.get("extra"):
+        payload["extra"] = args["extra"]
+    if args.get("aigc_watermark") is not None:
+        payload["aigc_watermark"] = bool(args["aigc_watermark"])
+
     return _adapt_payload(payload, args)
 
 
@@ -491,15 +511,51 @@ def _safe_stem(value: str) -> str:
 
 
 def _guess_task_id(url: str) -> str:
-    """从直链里猜出文件名 stem，拿不到就用时间戳。"""
+    """从直链里猜出文件名 stem（再拼 URL 指纹，避免同名互相覆盖）。"""
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
     try:
         name = Path(url.split("?")[0]).name
         stem = Path(name).stem
         if stem:
-            return _safe_stem(stem)
+            return f"{_safe_stem(stem)}-{digest}"
     except Exception:  # noqa: BLE001
         pass
-    return f"video-{int(time.time())}"
+    return f"video-{digest}"
+
+
+def _auth_hosts() -> set:
+    """允许携带鉴权头的主机名白名单。
+
+    只有平台自己的域名才配发 Authorization —— 否则
+    `download_video(任意 URL)` 会把你的中转站 key 送到第三方主机去。
+    """
+    hosts = set()
+    for base in _base_candidates():
+        try:
+            hosts.add(urlparse(base).hostname or "")
+        except Exception:  # noqa: BLE001
+            pass
+    cfg = CONFIG.get("journal") or {}
+    for extra in cfg.get("download_auth_hosts") or []:
+        hosts.add(str(extra).lower())
+    return {h for h in hosts if h}
+
+
+def _download_headers(url: str) -> Dict[str, str]:
+    """下载用请求头。同平台域名才带鉴权，第三方域名一律不带。"""
+    base = {
+        k: v for k, v in _headers().items()
+        if k.lower() not in ("content-type", "accept", "authorization", "x-api-key")
+    }
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        host = ""
+    if host and host in _auth_hosts():
+        for k, v in _headers().items():
+            if k.lower() in ("authorization", "x-api-key"):
+                base[k] = v
+    return base
 
 
 def _download_to(task_id: str, url: str) -> Path:
@@ -508,47 +564,95 @@ def _download_to(task_id: str, url: str) -> Path:
     d = _download_dir()
     d.mkdir(parents=True, exist_ok=True)
     suffix = Path(url.split("?")[0]).suffix or ".mp4"
-    target = d / f"{_safe_stem(task_id)}{suffix}"
-    timeout = int(cfg.get("download_timeout_seconds", 600))
-    max_bytes = int(cfg.get("download_max_bytes", 800 * 1024 * 1024))
+    stem = _safe_stem(task_id)
+    if not stem.endswith(url_digest_suffix(url)):
+        stem = f"{stem}{url_digest_suffix(url)}"
+    target = d / f"{stem}{suffix}"
+    timeout = int(cfg.get("download_timeout_seconds", 300))
+    max_bytes = int(cfg.get("download_max_bytes", 400 * 1024 * 1024))
     tmp = target.with_name(target.name + ".part")
 
-    # 有些站点/CDN 的产物直链也要鉴权，一并带上（CDN 会忽略多余头）
-    dl_headers = {
-        k: v for k, v in _headers().items() if k.lower() not in ("content-type", "accept")
-    }
+    dl_headers = _download_headers(url)
 
-    with requests.get(url, stream=True, timeout=timeout, headers=dl_headers) as r:
-        r.raise_for_status()
-        written = 0
-        with tmp.open("wb") as fh:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                written += len(chunk)
-                if written > max_bytes:
-                    tmp.unlink(missing_ok=True)
-                    raise RuntimeError(f"成片超过下载上限 {max_bytes} 字节，已中止")
-                fh.write(chunk)
+    try:
+        with requests.get(url, stream=True, timeout=timeout, headers=dl_headers) as r:
+            r.raise_for_status()
+            written = 0
+            with tmp.open("wb") as fh:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise RuntimeError(f"成片超过下载上限 {max_bytes} 字节，已中止")
+                    fh.write(chunk)
+    except BaseException:
+        tmp.unlink(missing_ok=True)   # 别留半截文件
+        raise
     tmp.replace(target)
     return target
 
 
+def url_digest_suffix(url: str) -> str:
+    """URL 的短指纹，用作文件名的一部分，防止同名覆盖。"""
+    return "-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+
+
 def _download_if_needed(task_id: str, url: str) -> Optional[str]:
-    """幂等转存：台账里已有且文件还在，就不重复下载。"""
+    """同步转存（供 download_video 工具用）。失败会抛，不会静默丢。"""
     cfg = CONFIG.get("journal") or {}
     if not cfg.get("auto_download", True):
         return None
     existing = _journal().get(task_id) or {}
     local = existing.get("local_path")
-    if local and Path(local).exists():
+    if local and Path(str(local)).exists():
         return str(local)
-    try:
-        path = _download_to(task_id, url)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[警告] 自动转存失败（{task_id}）：{exc}", file=sys.stderr)
+    return str(_download_to(task_id, url))
+
+
+_DOWNLOAD_THREADS: List[threading.Thread] = []
+
+
+def _download_in_background(task_id: str, url: str) -> threading.Thread:
+    """后台转存 —— 绝不在 MCP 工具调用里同步下几百 MB 的视频。
+
+    MCP server 是串行处理工具调用的，同步下载会把整个 server 堵住，
+    客户端超时断连后 Agent 很可能重提任务 = 再扣一次钱。
+    """
+    cfg = CONFIG.get("journal") or {}
+    if not cfg.get("auto_download", True):
         return None
-    return str(path)
+
+    def worker() -> None:
+        try:
+            path = _download_to(task_id, url)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[警告] 自动转存失败（{task_id}）：{exc}", file=sys.stderr)
+            _journal().record(
+                task_id, kind="task", event="download_failed", status="succeeded",
+                video_url=url, download_error=str(exc)[:500],
+            )
+            return
+        _journal().record(
+            task_id, kind="task", event="downloaded", status="succeeded",
+            video_url=url, local_path=str(path),
+        )
+        print(f"[完成] 成片已转存：{path}", file=sys.stderr)
+
+    thread = threading.Thread(target=worker, daemon=True, name=f"dl-{task_id}")
+    _DOWNLOAD_THREADS.append(thread)
+    thread.start()
+    return thread
+
+
+def _wait_for_downloads(timeout: float = 30.0) -> None:
+    """等所有后台转存线程结束（测试与收尾用）。"""
+    for thread in list(_DOWNLOAD_THREADS):
+        try:
+            thread.join(timeout)
+        except Exception:  # noqa: BLE001
+            pass
+    _DOWNLOAD_THREADS.clear()
 
 
 # --------------------------------------------------------------------------
@@ -567,6 +671,8 @@ def submit_video_generation(
     reference_videos: Optional[List[str]] = None,
     reference_audios: Optional[List[str]] = None,
     callback_url: Optional[str] = None,
+    extra: Optional[Dict[str, str]] = None,
+    aigc_watermark: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """提交一个异步视频生成任务，返回 task_id。
 
@@ -584,8 +690,11 @@ def submit_video_generation(
         reference_videos: 参考视频列表（只接受公网 URL）。
         reference_audios: 参考音频列表。
         callback_url: 可选回调地址。
+        extra: 官方 V2 的额外选项，如 {"prompt_expansion_mode": "quality"}。
+                只对 MiniMax-H3-Max 生效，传给 H3 会被平台忽略。
+        aigc_watermark: 是否加 AIGC 水印（官方 V2 字段，默认 false）。
 
-    返回: {"task_id", "status": "queued", "model", "provider", "request_payload"}
+    返回: {"task_id", "status": "queued", "model", "provider", "journaled", "request_payload"}
     """
     args = {
         "prompt": prompt,
@@ -599,23 +708,48 @@ def submit_video_generation(
         "reference_videos": reference_videos,
         "reference_audios": reference_audios,
         "callback_url": callback_url,
+        "extra": extra,
+        "aigc_watermark": aigc_watermark,
     }
 
     create_cfg = CONFIG.get("create", {})
     payload = _build_payload(args)
+
+    # ── 铁律一（前半）：先把"我准备提交"记下来 ────────────────────
+    # 万一上游受理了但响应丢了（超时/断网），我们至少知道"有个提交可能成功了"。
+    # 这时候**不要盲目重提**（重提 = 再扣一次钱），先去平台任务列表里查。
+    attempt_id = _journal().new_attempt_id()
+    _journal().record(
+        attempt_id,
+        kind="attempt",
+        event="submit_attempt",
+        status="submitting",
+        model=payload.get("model"),
+        prompt=args.get("prompt"),
+        duration=payload.get("duration"),
+        resolution=payload.get("resolution"),
+        ratio=payload.get("ratio"),
+    )
+
+    # ⚠️ 创建任务的 POST 绝不重试、绝不换域名重发。
+    # 上游一旦受理就计费；重试 = 可能多出一个计费任务，而第一个 task_id 我们拿不到。
     resp = _request(
         create_cfg.get("method", "POST"),
         create_cfg.get("path", "/v2/video_generation"),
         json_body=payload,
         timeout=create_cfg.get("timeout_seconds", 60),
+        allow_retry=False,
+        allow_fallback=False,
     )
     task_id = _extract_task_id(resp, create_cfg)
 
-    # ── 铁律一：task_id 立刻落库 ─────────────────────────────
+    # ── 铁律一（后半）：拿到 task_id 立刻落库 ────────────────────
     # 不落库的话，一旦会话重启 / 换窗口，就再也查不回这个任务了，
     # 而重新提交一次 = 再扣一次钱。
-    _journal().record(
+    journal = _journal()
+    written = journal.record(
         task_id,
+        kind="task",
         event="submitted",
         status="queued",
         model=payload.get("model"),
@@ -624,10 +758,25 @@ def submit_video_generation(
         resolution=payload.get("resolution"),
         ratio=payload.get("ratio"),
         request_payload=payload,
+        attempt_id=attempt_id,
     )
+    journal.record(
+        attempt_id,
+        kind="attempt",
+        event="resolved",
+        status="resolved",
+        resolved_task_id=task_id,
+    )
+    if written is None:
+        print(
+            f"[严重] task_id {task_id} 没能写入台账（{journal.last_error}）。"
+            f"请立刻手动记录这个 task_id，否则换会话后无法找回。",
+            file=sys.stderr,
+        )
 
     # 顺手提示"你是不是在重复提交"（重建任务 = 再扣一次钱）
-    duplicates = _journal().find_similar(
+    duplicates = journal.find_similar(
+        exclude_task_id=task_id,          # 别把自己算成重复
         model=payload.get("model"),
         prompt=args.get("prompt"),
         duration=payload.get("duration"),
@@ -647,6 +796,7 @@ def submit_video_generation(
         "status": "queued",
         "model": payload.get("model"),
         "provider": CONFIG.get("name"),
+        "journaled": written is not None,
         "request_payload": payload,
     }
 
@@ -675,8 +825,10 @@ def query_video_generation(task_id: str, model: Optional[str] = None) -> Dict[st
             if value == "":
                 continue
         params[key] = value
-    if model:
-        params.setdefault(query_cfg.get("model_param", "model"), model)
+    # 官方查询接口只接受路径参数 task_id，**不接收 model**。
+    # 只有厂商明确要求时才带上（query.model_param 显式配置了才加）。
+    if model and query_cfg.get("model_param"):
+        params.setdefault(query_cfg["model_param"], model)
 
     resp = _request(
         query_cfg.get("method", "GET"),
@@ -707,8 +859,10 @@ def query_video_generation(task_id: str, model: Optional[str] = None) -> Dict[st
         out["error"] = {"code": None, "message": "任务失败，未返回具体原因"}
 
     # ── 铁律一：状态变化同步进台账 ─────────────────────────
-    _journal().record(
+    journal = _journal()
+    journal.record(
         task_id,
+        kind="task",
         event="polled",
         status=status,
         raw_status=raw_status,
@@ -718,13 +872,22 @@ def query_video_generation(task_id: str, model: Optional[str] = None) -> Dict[st
         model=out.get("model"),
     )
 
-    # ── 铁律三：直链拿到就转存 ─────────────────────────────
-    # 产物直链会过期。与其等它过期，不如当场存到本地。
+    # ── 铁律三：直链拿到就转存（后台，不阻塞 MCP 调用）─────────
+    # 同步下载几百 MB 会把整个 MCP server 堵住，客户端超时断连后
+    # Agent 很可能重提任务 = 再扣一次钱。所以转存放后台线程。
     if status == "succeeded" and out.get("video_url"):
-        local = _download_if_needed(task_id, out["video_url"])
-        if local:
-            out["local_path"] = local
-            _journal().record(task_id, event="downloaded", status=status, local_path=local)
+        existing = journal.get(task_id) or {}
+        local = existing.get("local_path")
+        if local and Path(str(local)).exists():
+            out["local_path"] = str(local)
+            out["download_status"] = "saved"
+        else:
+            _download_in_background(task_id, out["video_url"])
+            out["download_status"] = "started"
+            out["download_note"] = (
+                "成片正在后台转存到本地；完成后 list_local_tasks 里会出现 local_path。"
+                "直链会过期，别等太久。"
+            )
 
     return out
 
@@ -733,12 +896,15 @@ def query_video_generation(task_id: str, model: Optional[str] = None) -> Dict[st
 def download_video(video_url: str, task_id: Optional[str] = None) -> Dict[str, Any]:
     """把成片直链下载到本地（转存）。
 
-    直链会过期，拿到就存。query_video_generation 在任务成功时会自动调一次本函数，
+    直链会过期，拿到就存。query_video_generation 在任务成功时会**自动**在后台转存，
     这里暴露出来是为了让你能在直链快过期时手动再存一份。
+
+    安全：只有**平台自己的域名**才会带上 Authorization 头；
+    第三方 URL 一律裸连（否则你的中转站 key 会被送到对方服务器去）。
 
     参数:
         video_url: 成片直链。
-        task_id: 任务 ID（可选）。给了就存成 {task_id}.mp4 并记进台账。
+        task_id: 任务 ID（可选）。给了就按 task_id 命名并记进台账。
 
     返回: {"local_path", "bytes"}
     """
@@ -747,8 +913,9 @@ def download_video(video_url: str, task_id: Optional[str] = None) -> Dict[str, A
     tid = task_id or _guess_task_id(video_url)
     path = _download_to(tid, video_url)
     size = path.stat().st_size if path.exists() else 0
-    if tid:
-        _journal().record(tid, event="downloaded", local_path=str(path), video_url=video_url)
+    _journal().record(
+        tid, kind="task", event="downloaded", local_path=str(path), video_url=video_url
+    )
     return {"local_path": str(path), "bytes": size, "task_id": tid}
 
 
@@ -759,7 +926,7 @@ def list_local_tasks(
 ) -> Dict[str, Any]:
     """列出本机台账（journal）里的视频任务。
 
-    这是「task_id 立刻落库」的查询口 —— 换会话、换机器、隔一天回来，
+    这是「task_id 立刻落库」的查询口 —— 换会话、换窗口、隔一天回来，
     靠它就能找回之前提交过的任务，不必重新提交（重新提交 = 再扣一次钱）。
 
     参数:
@@ -767,30 +934,37 @@ def list_local_tasks(
                  不填则返回全部。
         limit: 最多返回多少条（按最近优先）。
 
-    返回: {"tasks": [...], "total": n, "journal_path": "..."}
+    返回: {"tasks": [...], "total": n, "unresolved_attempts": [...], "journal_path": "..."}
     """
-    tasks = _journal().list(status=status, limit=limit)
+    journal = _journal()
+    tasks = journal.list(status=status, limit=limit)
     return {
         "tasks": tasks,
         "total": len(tasks),
-        "journal_path": str(_journal().path),
+        "unresolved_attempts": journal.unresolved_attempts(),
+        "journal_path": str(journal.path),
     }
 
 
 @mcp.tool()
 def resume_pending_tasks(limit: int = 10) -> Dict[str, Any]:
-    """继续查询所有未到终态的任务（换会话后用来续跑）。
+    """继续处理没做完的事（换会话后用来续跑）。
 
-    视频任务动辄十几分钟，会话很可能中途就断了。
-    本工具会拿台账里所有 queued / running 的任务去站点查一次，
-    返回它们的当前状态；成功的会自动转存成片。
+    视频任务动辄十几分钟，会话很可能中途就断了。本工具做三件事：
+      1. 拿台账里所有 queued / running 的任务去站点查一次
+      2. 对"已成功但成片还没存下来"的任务重试转存
+      3. 报告"提交了但没拿到 task_id"的尝试 —— 这些**不要盲目重提**，
+         先去平台任务列表（list_video_tasks）里查，可能其实已经受理了
 
     参数:
         limit: 一次最多续查多少个任务。
 
-    返回: {"resumed": [...], "still_pending": [...]}
+    返回: {"resumed": [...], "still_pending": [...], "redownloaded": [...],
+           "unresolved_attempts": [...]}
     """
-    pending = _journal().pending()[:limit]
+    journal = _journal()
+
+    pending = journal.pending()[:limit]
     resumed: List[Dict[str, Any]] = []
     for task in pending:
         tid = str(task.get("task_id"))
@@ -799,10 +973,34 @@ def resume_pending_tasks(limit: int = 10) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             result = {"task_id": tid, "status": "unknown", "error": {"message": str(exc)}}
         resumed.append(result)
+
+    # 已成功但没存下来的 -> 重试转存
+    redownloaded: List[Dict[str, Any]] = []
+    for task in journal.needs_download()[:limit]:
+        tid = str(task.get("task_id"))
+        url = task.get("video_url")
+        if not url:
+            continue
+        try:
+            path = _download_to(tid, url)
+            journal.record(
+                tid, kind="task", event="downloaded", status="succeeded",
+                local_path=str(path), video_url=url,
+            )
+            redownloaded.append({"task_id": tid, "local_path": str(path)})
+        except Exception as exc:  # noqa: BLE001
+            journal.record(
+                tid, kind="task", event="download_failed", status="succeeded",
+                video_url=url, download_error=str(exc)[:500],
+            )
+            redownloaded.append({"task_id": tid, "error": str(exc)[:300]})
+
     still_pending = [r for r in resumed if r.get("status") not in TERMINAL_STATUSES]
     return {
         "resumed": resumed,
         "still_pending": [r.get("task_id") for r in still_pending],
+        "redownloaded": redownloaded,
+        "unresolved_attempts": journal.unresolved_attempts(),
     }
 
 
@@ -951,9 +1149,35 @@ def regenerate_video_2k(
         spec["path"],
         json_body=body,
         timeout=spec.get("timeout_seconds", 60),
+        allow_retry=False,      # 同创建任务：重试 = 多一个计费任务
+        allow_fallback=False,
     )
     task_id = _extract_task_id(resp, CONFIG.get("create", {}))
-    return {"task_id": task_id, "status": "queued", "request_payload": body}
+
+    # ── 铁律一：升 2K 也是一个计费任务，同样必须落库 ──────────
+    journal = _journal()
+    written = journal.record(
+        task_id,
+        kind="task",
+        event="regenerated_2k",
+        status="queued",
+        model=body.get("model"),
+        resolution=body.get("resolution"),
+        source_task_id=source_task_id,
+        request_payload=body,
+    )
+    if written is None:
+        print(
+            f"[严重] 升 2K 的 task_id {task_id} 没能写入台账（{journal.last_error}）。"
+            f"请立刻手动记录，否则换会话后无法找回。",
+            file=sys.stderr,
+        )
+    return {
+        "task_id": task_id,
+        "status": "queued",
+        "journaled": written is not None,
+        "request_payload": body,
+    }
 
 
 @mcp.tool()

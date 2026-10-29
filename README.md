@@ -110,9 +110,9 @@ Agent 读完会自己完成克隆、读 key、注册、验证。你也可以直�
 
 | 铁律 | 实现 |
 | --- | --- |
-| **一、task_id 立刻落库** | 提交成功即写入本地台账 `.video-tasks.jsonl`。换会话、换机器、隔天回来，用 `list_local_tasks` / `resume_pending_tasks` 就能找回任务，**不必重新提交**（重新提交 = 再扣一次钱） |
-| **二、终态不要自动重试** | `failed` / `cancelled` 不会被自动重提，续跑时也会跳过。失败任务平台已自动退款，重试 = 再扣一次钱 |
-| **三、直链拿到就转存** | 任务成功时自动把成片下载到 `videos/`，返回值和台账里都给 `local_path`。直链过期也不怕 |
+| **一、task_id 立刻落库** | 提交**前**先记一条「提交尝试」，拿到 task_id **后**立刻写入台账 `.video-tasks.jsonl`。换会话、换窗口、隔天回来，用 `list_local_tasks` / `resume_pending_tasks` 就能找回任务，**不必重新提交**（重新提交 = 再扣一次钱） |
+| **二、终态不要自动重试** | 终态任务不进 pending，续跑跳过。**创建类请求（提交、升 2K）永不重试、永不换域名重发** —— 上游一旦受理就计费，重试可能多出一个计费任务。提交前若失败，会留下「未决提交」记录，提醒你去平台任务列表查，而不是盲目重提 |
+| **三、直链拿到就转存** | 任务成功时**在后台**把成片下载到 `videos/`，台账里出现 `local_path`。转存不阻塞 MCP 调用（否则客户端超时会诱发 Agent 重提）。下载失败会记进台账，`resume_pending_tasks` 会重试 |
 
 台账 `.video-tasks.jsonl` 和 `videos/` 都在 `.gitignore` 里，是本地状态，不进仓库。
 
@@ -133,8 +133,26 @@ MCP server 启动时如果发现未完成任务，会在 stderr 打一条提示 
 | 升 2K | `POST /v2/video_regeneration` |
 | 推荐模型 | `MiniMax-H3`（全形态，768P~4K，4~15 秒，2K 有声） |
 
-请求体与 **MiniMax 官方 V2 逐字段同形**（`model` / `content[]` / `resolution` / `duration` /
-`ratio` / `callback_url`），所以成片效果和走官方一致。
+请求体与 **MiniMax 官方 V2 同形**（`model` / `content[]` / `resolution` / `duration` / `ratio` /
+`callback_url` / `extra` / `aigc_watermark`），**同一个模型、同样的参数**。
+
+但中转站**不是官方**，下面这些差异要知道：
+
+### 与 MiniMax 官方的差异
+
+| # | 差异 | 影响 |
+| --- | --- | --- |
+| 1 | 不支持 `mm_file://` | 素材只能传公网 URL 或 `data:` 内联 |
+| 2 | **不支持只传 `last_frame`** | 必须与 `first_frame` 同传（客户端已前置拦截） |
+| 3 | `POST /v2/h3_context_ir` **未接入，固定 400** | 多镜头分镜文本得自己写，不能靠 Context-IR 生成 |
+| 4 | 多出 `1080P` / `4K` | 官方 H3 只有 `480P`/`768P`/`2K`；这是平台额外开放的，**不是官方规格** |
+| 5 | `usage` **只给秒数与图片数，不给 token** | 从官方迁过来的成本统计会缺 token 账 |
+| 6 | 报错 message 是中文，**末尾不带数字错误码** | 官方是 OpenAI 风格 `error.http_code` + `request_id` |
+| 7 | `extra.prompt_expansion_mode` 只对 `MiniMax-H3-Max` 生效 | 官方也是这样；传给 H3 不生效 |
+| 8 | `DELETE` 只能删**已结束**的任务 | 处理中的任务不能取消 |
+| 9 | 升 2K 仅 `model=MiniMax-H3` + `resolution=2K`，且 `source_task_id` 只认部分渠道出的 768P 成片 | 其他渠道的成片升不了 2K |
+
+所以准确的说法是：**模型和参数与官方一致，接口行为有上述九处差异。**
 
 ---
 

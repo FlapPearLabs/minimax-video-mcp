@@ -262,17 +262,22 @@ def step_register_hint(cfg: dict) -> None:
     step(6, "注册 MCP server")
     print("把下面的参数交给 Agent（用 mavis 工具的 mcp create；若已存在同名则用 mcp update）：")
     print()
+    # ⚠️ 绝对不要在这里印 env 占位符。
+    # keyfile 的优先级是 配置内联 > 环境变量 > api.txt，
+    # 一个占位符 env 会把用户 api.txt 里的真 key 顶掉，导致每次调用都 401。
+    # 正确做法：什么都不传，server.py 自己读同目录的 api.txt。
     payload = {
         "name": "minimax-video",
         "transport": "stdio",
-        "command": "python",
+        "command": sys.executable,       # 用当前解释器绝对路径，venv / python3 环境才不会挂
         "args": [str(HERE / "server.py")],
-        "env": {"VIDEO_API_KEY": "<你的 key>"},
         "description": "第三方中转站 MiniMax 视频生成",
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     print()
-    print("如果 Agent 端不方便带 env，也可以不传 env —— server.py 会自己读同目录的 api.txt。")
+    print("注意：**不要传 env**。server.py 会自己读同目录的 api.txt；")
+    print("      传 env 反而会让环境变量里的值盖掉 api.txt 里的真 key。")
+    print(f"      当前解释器：{sys.executable}")
 
 
 def main() -> int:
